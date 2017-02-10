@@ -45,6 +45,19 @@ def Setup() {
         multiple:   	true,
         required:   	true
     ]
+    def inputPush      = [
+        name:           "pushMessage",
+        type:           "bool",
+        title:          "Send push notifications?",
+        defaultValue:   true
+    ]
+
+    def inputSMS       = [
+        name:           "phoneNumber",
+        type:           "phone",
+        title:          "Send SMS notifications to?",
+        required:       false
+    ]
 	return dynamicPage(pageProperties) {
         section("Choose thermostat... ") {
             input "thermostat", "capability.thermostat"
@@ -64,6 +77,10 @@ def Setup() {
         section("What time window?") {
     	        href "timeIntervalInput", title: "Only during a certain time", description: getTimeLabel(starting, ending), state: greyedOutTime(starting, ending), refreshAfterSelection:true
     	}
+        section("Notification") {
+            input inputPush
+            input inputSMS
+        }
     }
 }
 
@@ -77,6 +94,7 @@ def updated()
 {
 	log.debug "enter updated, state: $state"
 	unsubscribe()
+    unschedule()
 	subscribeToEvents()
 }
 
@@ -89,6 +107,9 @@ def subscribeToEvents()
 		subscribe(thermostat, "thermostatMode", temperatureHandler)
 	}
 	evaluate()
+
+//    def t = timeToday(time, location.timeZone)
+    schedule("0 30 17 * * ?",resumeThermostat) 
 }
 
 def changedLocationMode(evt)
@@ -104,43 +125,82 @@ def temperatureHandler(evt)
 
 private evaluate()
 {
-if(allOk){
-	log.debug("Keep Me Cozy II-Time Window Running")
-	if (sensor) {
-		def threshold = 1.0
-		def tm = thermostat.currentThermostatMode
-		def ct = thermostat.currentTemperature
-		def currentTemp = sensor.currentTemperature
-		log.trace("evaluate:, mode: $tm -- temp: $ct, heat: $thermostat.currentHeatingSetpoint, cool: $thermostat.currentCoolingSetpoint -- "  +
-			"sensor: $currentTemp, heat: $heatingSetpoint, cool: $coolingSetpoint")
-		if (tm in ["cool","auto"]) {
-			// air conditioner
-			if (currentTemp - coolingSetpoint >= threshold) {
-				thermostat.setCoolingSetpoint(ct - 2)
-				log.debug "thermostat.setCoolingSetpoint(${ct - 2}), ON"
-			}
-			else if (coolingSetpoint - currentTemp >= threshold && ct - thermostat.currentCoolingSetpoint >= threshold) {
-				thermostat.setCoolingSetpoint(ct + 2)
-				log.debug "thermostat.setCoolingSetpoint(${ct + 2}), OFF"
-			}
-		}
-		if (tm in ["heat","emergency heat","auto"]) {
-			// heater
-			if (heatingSetpoint - currentTemp >= threshold) {
-				thermostat.setHeatingSetpoint(ct + 2)
-				log.debug "thermostat.setHeatingSetpoint(${ct + 2}), ON"
-			}
-			else if (currentTemp - heatingSetpoint >= threshold && thermostat.currentHeatingSetpoint - ct >= threshold) {
-				thermostat.setHeatingSetpoint(ct - 2)
-				log.debug "thermostat.setHeatingSetpoint(${ct - 2}), OFF"
-			}
-		}
-	}
-	else {
-		thermostat.setHeatingSetpoint(heatingSetpoint)
-		thermostat.setCoolingSetpoint(coolingSetpoint)
-		thermostat.poll()
-	}
+    if(allOk){
+        log.debug("Keep Me Cozy II-Time Window Running")
+        if (sensor) {
+            def threshold = 1.0
+            def MaxDifference = 3.0
+            def MaxTempSetpoint = heatingSetpoint+MaxDifference
+            def MinTempSetpoint = coolingSetpoint-MaxDifference
+            def sensorCurrentTemp = sensor.currentTemperature
+            def thermostatMode = thermostat.currentThermostatMode
+            def thermostatCurrentTemp = thermostat.currentTemperature
+            def thermostatCurrentHeatingSetpoint = thermostat.currentHeatingSetpoint
+            def thermostatCurrentCoolingSetpoint = thermostat.currentCoolingSetpoint
+            
+            log.trace("evaluate:, mode: $thermostatMode -- temp: $thermostatCurrentTemp, heat: $thermostat.currentHeatingSetpoint, cool: $thermostat.currentCoolingSetpoint -- "  +
+                "sensor: $sensorCurrentTemp, heat: $heatingSetpoint, cool: $coolingSetpoint")
+            if (thermostatMode in ["cool","auto"]) {
+                // air conditioner
+                if (sensorCurrentTemp - thermostat.currentCoolingSetpoint >= MaxDifference) {
+            		send("Thermostat Max Temp Difference Error")
+                    log.debug "MaxDifference temperature reached"
+                    resumeThermostat()
+                }
+				if (sensorCurrentTemp - coolingSetpoint >= threshold) {
+					thermostat.setCoolingSetpoint(thermostatCurrentTemp - 2)
+					log.debug "thermostat.setCoolingSetpoint(${thermostatCurrentTemp - 2}), ON"
+                	send("Sensor(${sensorCurrentTemp}) > Setpoint(${coolingSetpoint}): Thermostat Set to ${thermostatCurrentTemp + 2}")
+				}
+                else if (coolingSetpoint > sensorCurrentTemp) {
+					thermostat.setHeatingSetpoint(coolingSetpoint)
+                    log.debug "sensor temperature below setpoint"
+                    send("Sensor(${sensorCurrentTemp}) > Setpoint(${coolingSetpoint}): Thermostat Set to ${coolingSetpoint}")
+                }                
+				else if (coolingSetpoint == sensorCurrentTemp && thermostatCurrentCoolingSetpoint < coolingSetpoint) {
+					thermostat.setCoolingSetpoint(thermostatCurrentTemp)
+                    log.debug "sensor temperature equal setpoint"
+                    send("Sensor(${sensorCurrentTemp}) = Setpoint(${coolingSetpoint}): Thermostat Set to ${thermostatCurrentTemp}")
+                }
+                //else if (coolingSetpoint - sensorCurrentTemp >= threshold && thermostatCurrentTemp - thermostat.currentCoolingSetpoint >= threshold) {
+                    //thermostat.setCoolingSetpoint(thermostatCurrentTemp + 2)
+                    //log.debug "thermostat.setCoolingSetpoint(${thermostatCurrentTemp + 2}), OFF"
+                    //log.debug "temperature reached resuming program"
+                    //send("Sensor(${sensorCurrentTemp}) < Thermostat Setpoint(${thermostat.currentCoolingSetpoint}): Resume")
+                    //resumeThermostat()                    
+                //}
+            }
+			if (thermostatMode in ["heat","emergency heat","auto"]) {
+				// heater
+				if (heatingSetpoint - sensorCurrentTemp >= threshold) {
+                	if (thermostatCurrentTemp + 2 >= MaxTempSetpoint) {
+                        thermostat.setHeatingSetpoint(MaxTempSetpoint)
+                        send("Thermostat Max Temp Diff: Sensor(${sensorCurrentTemp}) < Setpoint(${heatingSetpoint}): Thermostat(${thermostatCurrentTemp}) Set to ${MaxTempSetpoint}")
+                        log.debug "Max Difference temperature reached"
+                    }
+                    else {
+                        thermostat.setHeatingSetpoint(thermostatCurrentTemp + 2)
+                        log.debug "thermostat.setHeatingSetpoint(${thermostatCurrentTemp + 2}), ON"
+                        send("Sensor(${sensorCurrentTemp}) < Setpoint(${heatingSetpoint}): Thermostat(${thermostatCurrentTemp}) Set to ${thermostatCurrentTemp + 2}")
+                    }
+				}
+				else if (sensorCurrentTemp > heatingSetpoint && thermostatCurrentHeatingSetpoint > heatingSetpoint) {
+					thermostat.setHeatingSetpoint(thermostatCurrentTemp - 1)
+                    log.debug "sensor temperature above setpoint"
+                    send("Sensor(${sensorCurrentTemp}) > Setpoint(${heatingSetpoint}): Thermostat(${thermostatCurrentTemp}) Set to ${thermostatCurrentTemp - 1}")
+                }
+				else if (sensorCurrentTemp == heatingSetpoint && thermostatCurrentHeatingSetpoint > heatingSetpoint) {
+					thermostat.setHeatingSetpoint(thermostatCurrentTemp)
+                    log.debug "sensor temperature equal setpoint"
+                    send("Sensor(${sensorCurrentTemp}) = Setpoint(${heatingSetpoint}): Thermostat(${thermostatCurrentTemp}) Set to ${thermostatCurrentTemp}")
+                }
+			}	
+        }
+        else {
+            thermostat.setHeatingSetpoint(heatingSetpoint)
+            thermostat.setCoolingSetpoint(coolingSetpoint)
+            thermostat.poll()
+        }
     }
 }
 
@@ -170,7 +230,8 @@ private getTimeOk() {
     else if (ending){
     	result = currTime <= stop
     }
-    
+    log.trace "ending= $ending"
+    log.trace "starting= $starting"
 	log.trace "timeOk = $result"
 	result
 }
@@ -222,12 +283,32 @@ def greyedOutTime(starting, ending){
     result
 }
 
+def send(msg) {
+    log.debug msg
+
+    if (settings.pushMessage) {
+        sendPush(msg)
+    } else {
+        sendNotificationEvent(msg)
+    }
+
+    if (settings.phoneNumber != null) {
+        sendSms(phoneNumber, msg) 
+    }
+}
+
 // for backward compatibility with existing subscriptions
 def coolingSetpointHandler(evt) {
 	log.debug "coolingSetpointHandler()"
 }
 def heatingSetpointHandler (evt) {
 	log.debug "heatingSetpointHandler ()"
+}
+
+def resumeThermostat(){
+	log.debug "resumeThermostat()"
+    send("Thermostat Resume")
+    thermostat.resumeProgram()
 }
 
 page(name: "timeIntervalInput", title: "Only during a certain time", refreshAfterSelection:true) {
